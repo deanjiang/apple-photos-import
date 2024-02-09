@@ -109,8 +109,17 @@ def wait_for_space(min_disk_space=10*1024*1024*1024):
 
 
 
-def import_photos(file_list, batch_size=500, min_disk_space=15*1024*1024*1024):
-    """The function imports the given list of photos to the Photos app."""
+def import_photos(file_list, batch_size=500, min_disk_space=15*1024*1024*1024, timeout=30):
+    """The function imports the given list of photos to the Photos app.
+    
+    @param file_list: The list of full paths of the photos to import.
+    @param batch_size: The number of photos to import before restarting the Photos app.
+    @param min_disk_space: The minimum disk space in bytes to wait before importing the next photo.
+    @param timeout: The maximum time in seconds to wait for the import process to finish.
+
+    The function **append** the list of imported photos to the "imported_photos.csv" file and the 
+    list of error importing photos to the "error_importing.csv" file.
+    """
     
     count=0
     error_count=0
@@ -129,7 +138,7 @@ def import_photos(file_list, batch_size=500, min_disk_space=15*1024*1024*1024):
                 command = f'osxphotos import -walk --album "{{filepath.parent.name}}"  --verbose --skip-dups --dup-albums --sidecar --keyword "{{person}}" "{file}" 2>&1'
                 process = subprocess.Popen(command, stdout=subprocess.PIPE, text=True, shell=True)
                 # Wait for the process to finish and get the stdout and exit code
-                stdout, stderr = process.communicate(timeout=15) # timeout in 15 seconds
+                stdout, stderr = process.communicate(timeout=timeout) # timeout in 15 seconds
                 exit_code = process.returncode
             except:
                 # The import process can be blocked when the Photos app is not responding or asking for confirmation.
