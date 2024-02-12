@@ -7,11 +7,16 @@ import sys
 import subprocess
 import random
 import time
+import traceback
+import datetime
 
 
 def list_files(folder):
-    """The function enumerate the given folder and return a 
-    list of full paths of the files in the folder recursively."""
+    """The function enumerates the given folder and returns a 
+    list of full paths of the files in the folder recursively.
+    
+    @return: A shuffled list of full paths of the files in the folder.
+    """
 
     # if folder is a file, then return the file path
     if os.path.isfile(folder):
@@ -95,21 +100,19 @@ def wait_for_space(min_disk_space=10*1024*1024*1024):
     if free_space < min_disk_space:
         print() # add a new line
         # Send an imessage to the user
-        send_imessage("Not enough space in the disk. Will retry every 5 minutes.")
+        send_imessage("Not enough space in your storage. Photos importing will retry every 5 minutes.")
         while free_space < min_disk_space:
-            print(f"\rNot enough space in the disk. Will retry in 5 minutes (or press ENTER):", end="")
+            print(f"\rNot enough space in your storage. Will retry in 5 minutes (or press ENTER):", end="")
             # wait for the user to type any key or 5 minutes
             i, o, e = select.select([sys.stdin], [], [], 300)
             if i:
                 input()
             stat = os.statvfs(os.path.expanduser("~/"))
             free_space = stat.f_bavail * stat.f_frsize
-        send_imessage("Importing resumes now.")
+        send_imessage("Photos importing resumes now.")
 
 
-
-
-def import_photos(file_list, batch_size=500, min_disk_space=15*1024*1024*1024, timeout=30):
+def import_photos(file_list, batch_size=500, min_disk_space=15*1024*1024*1024):
     """The function imports the given list of photos to the Photos app.
     
     @param file_list: The list of full paths of the photos to import.
@@ -121,38 +124,44 @@ def import_photos(file_list, batch_size=500, min_disk_space=15*1024*1024*1024, t
     list of error importing photos to the "error_importing.csv" file.
     """
     
+    total_time = 0
     count=0
     error_count=0
     dup_count=0
+    max_print_width = 0
+
     # open the "imported_photos.csv" file in write mode
     with open("imported_photos.csv", "a") as f, open("error_importing.csv", "a") as e:
 
         for file in file_list:
+            # test if the file still exists as this is a long process
+            if not os.path.exists(file):
+                print(f"\n  Files no longer exit or have been changed. Stop importing...")
+                send_imessage(f"Files no longer exit or have been changed. Stop importing...")
+                # we need to quit the processing because osxphotos will not report an error if the file is not found
+                break
 
+            # wait for the disk space to be available   
             wait_for_space(min_disk_space)
-
-            reboot = False
-
+            begin = time.time()
             # run the CLI command to import photos into the Photos app, and get the stdout and stderr as a tuple
             try:
-                command = f'osxphotos import -walk --album "{{filepath.parent.name}}"  --verbose --skip-dups --dup-albums --sidecar --keyword "{{person}}" "{file}" 2>&1'
-                process = subprocess.Popen(command, stdout=subprocess.PIPE, text=True, shell=True)
+                command = f'osxphotos import --album "{{filepath.parent.name}}"  --verbose --skip-dups --dup-albums --sidecar --keyword "{{person}}" "{file}" 2>&1'
+                process = subprocess.Popen(command, stdin=None, stdout=subprocess.PIPE, stderr=subprocess.PIPE,  text=True, shell=True)
                 # Wait for the process to finish and get the stdout and exit code
-                stdout, stderr = process.communicate(timeout=timeout) # timeout in 15 seconds
+                # set timeout in proportion to the file size
+                timeout = max(30, 10 * os.path.getsize(file) // 1024 // 1024)
+                stdout, stderr = process.communicate(timeout=timeout) 
                 exit_code = process.returncode
-            except:
+            except subprocess.TimeoutExpired as e:
                 # The import process can be blocked when the Photos app is not responding or asking for confirmation.
-                # When timeout occurs, we will record the importing error and reboot the Photos app.
-                stdout = "Uncaught exception while running osxphotos import command."
-                stderr = "Uncaught exception while running osxphotos import command."
-                exit_code = 1
-                # reboot the Photos app to avoid import error
-                reboot = True
-
+                print(f"\n  Terminating importing due to no responses after {timeout} secs.")
+                if os.system("pgrep osxphotos > /dev/null 2>&1") == 0:
+                    os.system("killall osxphotos > /dev/null 2>&1")         
+                exit_code = -1
 
             count += 1
-            # Success if the result contains "Error importing file"
-            if exit_code != 0 or stderr is not None:
+            if exit_code != 0:
                 e.write(f"{file}\n")
                 e.flush()
                 error_count += 1
@@ -163,20 +172,23 @@ def import_photos(file_list, batch_size=500, min_disk_space=15*1024*1024*1024, t
                 f.write(f"{file}\n")
                 f.flush()
 
-            # print(f"\n\n")
-            # print(f"DEBUG: {result}")
-            # print(f"\n\n")
+            # kills the Photos app after timeoutprocessing batch_size of photos
+            if exit_code == -1 or count % batch_size == 0:
+                progress = f"  Restarting the Photos app..."
+                print(f"\r{progress:{max_print_width}}", end="")
+                time.sleep(5) # to ensure the Photos app has saved all the changes
+                if os.system("pgrep Photos > /dev/null 2>&1") == 0:
+                    os.system("killall Photos > /dev/null 2>&1")
+            
+            # Show remaining time and the progress
+            total_time = total_time + (time.time() - begin)
+            time_remaining = (len(file_list) - count) * (total_time / count) // 60 * 60 
+            progress = f"  {datetime.timedelta(seconds=time_remaining)} remaining, {count}/{len(file_list)} processed ({error_count} errors and {dup_count} duplicates)."
+            max_print_width = max(max_print_width, len(progress))
+            print(f"\r{progress:{max_print_width}}", end="")
 
-            print(f"\r{count}/{len(file_list)} processed ({error_count} errors and {dup_count} duplicates).", end="")
-
-            # kills the Photos app after processing batch_size of photos
-            if reboot or count % batch_size == 0:
-                print(f"\rRestarting the Photos app to avoid import error.", end="")
-                # to ensure the Photos app has saved all the changes
-                time.sleep(5)
-                os.system("killall Photos")
-        
-        print(f"\r{count}/{len(file_list)} processed ({error_count} errors and {dup_count} duplicates).")
+        progress = f"  {count}/{len(file_list)} processed ({error_count} errors and {dup_count} duplicates)"
+        print(f"\r{progress:{max_print_width}}")
 
     
 def show_usage():
@@ -187,7 +199,7 @@ def show_usage():
 
 if __name__ == "__main__":
     # check if the osxphotos is installed
-    if os.system("osxphotos --version") != 0:
+    if os.system("osxphotos --version > /dev/null 2>&1")!= 0:
         print("Please install osxphotos by running 'pip3 install osxphotos'")
         show_usage()
         sys.exit(1)
@@ -213,28 +225,36 @@ if __name__ == "__main__":
 
     # list all the files in the folder
     file_list = list_files(folder)
-    print(f"Total {len(file_list)} files found.")
+    print(f"{len(file_list)} files found in {folder}.")
 
     # get the unique set of file extensions
     ext_set = get_file_extension(file_list)
     ext_set = {ext.lower() for ext in ext_set}
-
-    supported_ext = {'.jpeg', '.ARW', '.jpg', '.png', '.HEIC', '.mp4', '.mov', '.PNG', '.MOV', '.JPG', ".nef", ".gif", ".mpg", ".m4v"}
+    supported_ext = {'.jpeg', '.ARW', '.jpg', '.png', '.HEIC', '.mp4', '.mov', '.PNG', '.MOV', '.JPG', ".nef", ".gif", ".mpg", ".m4v", ".tif", ".tiff", ".heif", ".heic", ".avif", ".webp"}
     supported_ext = {ext.lower() for ext in supported_ext}
-    print(f"Supported extentions (case insensitive): {supported_ext}")
-    print(f"Ignoring the following extentions (case insensitive): {ext_set - supported_ext}")
+    print(f"Ignoring file extentions (case insensitive): {list(ext_set - supported_ext)}")
 
     # filter the file list based on the given list of file extensions
     file_list = filter_by_file_extention(file_list, supported_ext)
+    num_supported_photos = len(file_list)
+    print(f"{num_supported_photos} photos found in supported formats.")
 
-    # filter the file list based on the given list of imported photos
+    # Remove previously imported photos and those with errors
+    
     file_list = filter_imported_photos(file_list)
+    num_imported_photos = num_supported_photos - len(file_list)
+    print(f"{num_imported_photos} photos were previously imported.")
 
-    # filter the file list based on the given list of error importing photos
     file_list = filter_error_importing(file_list)
+    num_failed_photos = num_supported_photos - len(file_list) - num_imported_photos
+    print(f"{num_failed_photos} photos were priviously tried but failed.")
 
-    print(f"Total {len(file_list)} files to import.")
-    # import the photos
+    # we send a message to the user at this point to make sure we are granted the proper permission to send messages
+    msg = f"Importing {len(file_list)} photos into the Photos app."
+    print(msg)
+    send_imessage(msg)
+
+    # importing the photos
     import_photos(file_list)
     print("Done.")
     sys.exit(0)
