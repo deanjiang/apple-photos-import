@@ -11,7 +11,7 @@ import traceback
 import datetime
 
 
-def list_files(folder):
+def list_files(folder, exclude_dirs={"@eaDir", ".picasaoriginals", "#recycle"}, exclude_dir_ext={".photoslibrary"}):
     """The function enumerates the given folder and returns a 
     list of full paths of the files in the folder recursively.
     
@@ -23,7 +23,19 @@ def list_files(folder):
         return [folder]
 
     file_list = []
-    for root, dirs, files in os.walk(folder):
+    
+    for root, dirs, files in os.walk(folder, topdown=True):
+        # remove exclude_dirs from dirs
+        names_to_remove = []
+        for name in dirs:
+            if name in exclude_dirs:
+                names_to_remove.append(name)
+            elif os.path.splitext(name)[1].lower() in exclude_dir_ext:
+                names_to_remove.append(name)
+
+        for name in names_to_remove:
+            dirs.remove(name)
+
         for file in files:
             file_list.append(os.path.join(root, file))
 
@@ -93,7 +105,7 @@ def send_imessage(message):
     '''
     subprocess.run(['osascript', '-e', applescript])
 
-def wait_for_space(min_disk_space=10*1024*1024*1024):
+def wait_for_space(min_disk_space):
     """The function waits until there are enough space in the disk."""
     stat = os.statvfs(os.path.expanduser("~/"))
     free_space = stat.f_bavail * stat.f_frsize
@@ -101,7 +113,8 @@ def wait_for_space(min_disk_space=10*1024*1024*1024):
         print() # add a new line
         # Send an imessage to the user
         send_imessage("Not enough space in your storage. Photos importing will retry every 5 minutes.")
-        while free_space < min_disk_space:
+        # wait until there are more than enough space in the disk
+        while free_space < min_disk_space * 1.1:
             print(f"\rNot enough space in your storage. Will retry in 5 minutes (or press ENTER):", end="")
             # wait for the user to type any key or 5 minutes
             i, o, e = select.select([sys.stdin], [], [], 300)
@@ -124,11 +137,11 @@ def import_photos(file_list, batch_size=500, min_disk_space=15*1024*1024*1024):
     list of error importing photos to the "error_importing.csv" file.
     """
     
-    total_time = 0
+    average_time = 1 # seconds per file
     count=0
     error_count=0
     dup_count=0
-    max_print_width = 0
+    max_print_width = 1 # The 0 width format is now allowed in f-string.
 
     # open the "imported_photos.csv" file in write mode
     with open("imported_photos.csv", "a") as f, open("error_importing.csv", "a") as e:
@@ -136,8 +149,8 @@ def import_photos(file_list, batch_size=500, min_disk_space=15*1024*1024*1024):
         for file in file_list:
             # test if the file still exists as this is a long process
             if not os.path.exists(file):
-                print(f"\n  Files no longer exit or have been changed. Stop importing...")
-                send_imessage(f"Files no longer exit or have been changed. Stop importing...")
+                print(f"\n  Files no longer exit or have been moved.")
+                send_imessage(f"Files no longer exit or have been moved.")
                 # we need to quit the processing because osxphotos will not report an error if the file is not found
                 break
 
@@ -153,9 +166,9 @@ def import_photos(file_list, batch_size=500, min_disk_space=15*1024*1024*1024):
                 timeout = max(30, 10 * os.path.getsize(file) // 1024 // 1024)
                 stdout, stderr = process.communicate(timeout=timeout) 
                 exit_code = process.returncode
-            except subprocess.TimeoutExpired as e:
+            except subprocess.TimeoutExpired:
                 # The import process can be blocked when the Photos app is not responding or asking for confirmation.
-                print(f"\n  Terminating importing due to no responses after {timeout} secs.")
+                print(f"\n  Terminating importing after no responses for {timeout} secs.")
                 if os.system("pgrep osxphotos > /dev/null 2>&1") == 0:
                     os.system("killall osxphotos > /dev/null 2>&1")         
                 exit_code = -1
@@ -173,21 +186,24 @@ def import_photos(file_list, batch_size=500, min_disk_space=15*1024*1024*1024):
                 f.flush()
 
             # kills the Photos app after timeoutprocessing batch_size of photos
+            # or when the import process timeout 
             if exit_code == -1 or count % batch_size == 0:
-                progress = f"  Restarting the Photos app..."
-                print(f"\r{progress:{max_print_width}}", end="")
-                time.sleep(5) # to ensure the Photos app has saved all the changes
                 if os.system("pgrep Photos > /dev/null 2>&1") == 0:
-                    os.system("killall Photos > /dev/null 2>&1")
+                    progress = f"  Restarting the Photos app..."
+                    print(f"\r{progress:{max_print_width}}", end="")
+                    time.sleep(5) # to ensure the Photos app has saved all the changes
+                    if os.system("pgrep Photos > /dev/null 2>&1") == 0:
+                        os.system("killall Photos > /dev/null 2>&1")
             
             # Show remaining time and the progress
-            total_time = total_time + (time.time() - begin)
-            time_remaining = (len(file_list) - count) * (total_time / count) // 60 * 60 
-            progress = f"  {datetime.timedelta(seconds=time_remaining)} remaining, {count}/{len(file_list)} processed ({error_count} errors and {dup_count} duplicates)."
+            average_time = average_time * 0.8 + (time.time() - begin) * 0.2
+            time_remaining = (len(file_list) - count) * average_time // 60 * 60
+            precentage_remaining = (len(file_list) - count) * 100 // len(file_list)
+            progress = f"  {precentage_remaining}% or {datetime.timedelta(seconds=time_remaining)} remaining ({count} processed, {error_count} errors and {dup_count} duplicates)."
             max_print_width = max(max_print_width, len(progress))
             print(f"\r{progress:{max_print_width}}", end="")
 
-        progress = f"  {count}/{len(file_list)} processed ({error_count} errors and {dup_count} duplicates)"
+        progress = f"  {count} processed, {error_count} errors and {dup_count} duplicates."
         print(f"\r{progress:{max_print_width}}")
 
     
@@ -224,13 +240,14 @@ if __name__ == "__main__":
         sys.exit(1)
 
     # list all the files in the folder
+    print(f"Scanning files in {folder} ...")
     file_list = list_files(folder)
-    print(f"{len(file_list)} files found in {folder}.")
+    print(f"{len(file_list)} files found.")
 
     # get the unique set of file extensions
     ext_set = get_file_extension(file_list)
     ext_set = {ext.lower() for ext in ext_set}
-    supported_ext = {'.jpeg', '.ARW', '.jpg', '.png', '.HEIC', '.mp4', '.mov', '.PNG', '.MOV', '.JPG', ".nef", ".gif", ".mpg", ".m4v", ".tif", ".tiff", ".heif", ".heic", ".avif", ".webp"}
+    supported_ext = {'.jpeg', '.ARW', '.jpg', '.png', '.HEIC', '.mp4', '.mov', '.PNG', '.MOV', '.JPG', ".nef", ".gif", ".mpg", ".m4v", ".tif", ".tiff", ".heif", ".heic", ".avif", ".webp", ".avi", ".bmp", ".wmv"}
     supported_ext = {ext.lower() for ext in supported_ext}
     print(f"Ignoring file extentions (case insensitive): {list(ext_set - supported_ext)}")
 
