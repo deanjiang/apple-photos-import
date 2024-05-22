@@ -19,6 +19,9 @@ You can repeat the above steps for multiple google accounts to combine the image
 
 ## Import to the Photos app
 
+installation
+
+
 ```bash
 % APPLE_ID=appleid@icloud.com ./apimport.py <DirToProcess>
 ```
@@ -36,6 +39,10 @@ notifications
 Skip successful imports
 
 watch for ignored files.
+
+.photolibrary
+
+large repository folders (e.g. thumnails, etc.)
 
 ## Delete Google Photos
 
